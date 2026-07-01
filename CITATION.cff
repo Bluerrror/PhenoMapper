@@ -1,0 +1,53 @@
+cff-version: 1.2.0
+message: "If you use this software or the underlying phenology product, please cite the paper below."
+title: "PhenoMapper — Interactive crop-phenology explorer for Germany (Google Earth Engine)"
+abstract: >-
+  An interactive Google Earth Engine application that visualizes machine-learning
+  crop-phenology predictions (13 BBCH growth stages for 8 major crops) across Germany
+  at 20 m resolution for 2017-2021, from fused Sentinel-1, Sentinel-2 and climate data.
+type: software
+authors:
+  - family-names: Shojaeezadeh
+    given-names: Shahab Aldin
+    orcid: "https://orcid.org/0000-0003-3260-7141"
+    affiliation: "University of Kassel"
+    email: shahab@uni-kassel.de
+  - family-names: Elnashar
+    given-names: Abdelrazek
+    orcid: "https://orcid.org/0000-0001-8008-5670"
+    affiliation: "University of Kassel"
+  - family-names: Weber
+    given-names: Tobias Karl David
+    affiliation: "University of Kassel"
+license: MIT
+keywords:
+  - crop phenology
+  - BBCH
+  - Sentinel-1
+  - Sentinel-2
+  - Google Earth Engine
+  - LightGBM
+  - remote sensing
+  - Germany
+preferred-citation:
+  type: article
+  title: "A novel fusion of Sentinel-1 and Sentinel-2 with climate data for crop phenology estimation using Machine Learning"
+  authors:
+    - family-names: Shojaeezadeh
+      given-names: Shahab Aldin
+      orcid: "https://orcid.org/0000-0003-3260-7141"
+    - family-names: Elnashar
+      given-names: Abdelrazek
+      orcid: "https://orcid.org/0000-0001-8008-5670"
+    - family-names: Weber
+      given-names: Tobias Karl David
+  journal: "Science of Remote Sensing"
+  volume: 11
+  start: 100227
+  year: 2025
+  month: 6
+  issn: "2666-0172"
+  doi: "10.1016/j.srs.2025.100227"
+  url: "https://doi.org/10.1016/j.srs.2025.100227"
+  publisher:
+    name: "Elsevier BV"
