@@ -33,8 +33,7 @@ The app lets you:
 
 ## 🚀 Live app
 
-> **Add your published Earth Engine App URL here**, e.g.
-> **https://YOUR-EE-USERNAME.users.earthengine.app/view/phenomapper**
+> **(https://ee-shahab2710.projects.earthengine.app/view/phenomapper)**
 
 To publish it yourself, open [`src/phenomapper.js`](src/phenomapper.js) in the [Earth Engine Code Editor](https://code.earthengine.google.com/), import the required assets (below), then use **Apps → Publish**. See [Getting started](#-getting-started).
 
