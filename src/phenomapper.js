@@ -195,21 +195,14 @@ function cropMaskSingle(year, code) {
   return ctmYearImg(year).eq(Number(code)).selfMask();
 }
 
-// Zoom-aware display resolution: at national zoom, aggregate to a coarse grid so
-// tiles render fast AND sparse fields fill in (instead of scattered pixels).
-function scaleForZoom(z) {
-  if (z == null) return 0;
-  if (z <= 6) return 1500;
-  if (z <= 7) return 800;
-  if (z <= 8) return 400;
-  if (z <= 9) return 200;
-  return 0;                       // z >= 10 → native full resolution
-}
-function coarsen(img, reducer, s) {
-  if (!s) return img;
+// Aggregate 20 m data to the map's *current* display resolution (mean for
+// continuous layers, mode for categorical). This fills sparse fields at low
+// zoom — instead of scattered pixels — and adapts automatically as you zoom,
+// WITHOUT reproject() (which would lock the zoom and cause an event loop) and
+// without any zoom listener.
+function smoothDisplay(img, reducer) {
   return img.setDefaultProjection('EPSG:3857', null, 20)
-            .reduceResolution({reducer: reducer, maxPixels: 1024, bestEffort: true})
-            .reproject({crs: 'EPSG:3857', scale: s});
+            .reduceResolution({reducer: reducer, maxPixels: 1024, bestEffort: true});
 }
 
 
@@ -339,16 +332,15 @@ function meanImg(stage) {
   return ee.ImageCollection(YEARS.map(function (y) { return phenoImg(y, stage); })).mean();
 }
 function updateCropLayer() {
-  var s = scaleForZoom(leftMap.getZoom());
   if (state.isolate) {
     var crop = cropOrFirst(state.cropCode);
-    layer_Crop.setEeObject(coarsen(cropMaskSingle(state.year, state.cropCode), ee.Reducer.mean(), s));
+    layer_Crop.setEeObject(smoothDisplay(cropMaskSingle(state.year, state.cropCode), ee.Reducer.mean()));
     layer_Crop.setVisParams({min: 0.001, max: 1, palette: [crop.color]});
     layer_Crop.setName('Crop · ' + crop.name + ' · ' + state.year);
     renderCropLegend(crop.name + ' — ' + state.year);
   } else {
     var img = remapper(ctmYearImg(state.year)).updateMask(focusMaskImg(state.year));
-    layer_Crop.setEeObject(coarsen(img, ee.Reducer.mode(), s));
+    layer_Crop.setEeObject(smoothDisplay(img, ee.Reducer.mode()));
     layer_Crop.setVisParams({min: 1, max: 8, palette: dict.colors});
     layer_Crop.setName('Crop Type Map · 10 m · ' + state.year);
     renderCropLegend('Crop Type — ' + state.year);
@@ -395,7 +387,7 @@ function updatePhenology() {
   }
 
   state.mapPalette = palette; state.colorTitle = title;
-  layer.setEeObject(coarsen(base, ee.Reducer.mean(), scaleForZoom(rightMap.getZoom())));
+  layer.setEeObject(smoothDisplay(base, ee.Reducer.mean()));
   layer.setName(name);
   layer.setOpacity(state.opacity);
 
@@ -1073,17 +1065,6 @@ ui.root.add(appSplit);
 renderColorBar();
 updatePhenology();
 updateCropLayer();
-
-// Re-render at a coarser resolution when the map crosses a zoom band (national
-// vs. local), so low zoom stays fast and fields fill in instead of showing as
-// scattered pixels. Guarded so panning at the same zoom does not re-render.
-var lastZoomBucket = scaleForZoom(rightMap.getZoom());
-function onZoomChange() {
-  var b = scaleForZoom(rightMap.getZoom());
-  if (b !== lastZoomBucket) { lastZoomBucket = b; updatePhenology(); updateCropLayer(); }
-}
-rightMap.onChangeZoom(onZoomChange);
-leftMap.onChangeZoom(onZoomChange);
 
 // Center on the Frankenhausen study site AFTER the maps are attached to the
 // root — a setCenter call before attachment is dropped once the nested split
