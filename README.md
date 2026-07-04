@@ -34,9 +34,17 @@ The app lets you:
 
 ## 🚀 Live app
 
-> **(https://ee-shahab2710.projects.earthengine.app/view/phenomapper)**
+<div align="center">
 
-To publish it yourself, open [`src/phenomapper.js`](src/phenomapper.js) in the [Earth Engine Code Editor](https://code.earthengine.google.com/), import the required assets (below), then use **Apps → Publish**. See [Getting started](#-getting-started).
+### ▶️ [**Launch PhenoMapper**](https://ee-shahab2710.projects.earthengine.app/view/phenomapper)
+
+[![Launch PhenoMapper](https://img.shields.io/badge/▶_Launch-PhenoMapper-1b5e20?style=for-the-badge)](https://ee-shahab2710.projects.earthengine.app/view/phenomapper)
+
+*No install needed — runs in your browser on Google Earth Engine.*
+
+</div>
+
+To publish your own copy, open [`src/phenomapper.js`](src/phenomapper.js) in the [Earth Engine Code Editor](https://code.earthengine.google.com/), import the required assets (below), then use **Apps → Publish**. See [Getting started](#-getting-started).
 
 ---
 
