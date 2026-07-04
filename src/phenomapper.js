@@ -344,6 +344,13 @@ function updatePhenology() {
     name = 'Phenology · DOY · ' + bbchLabel(stage) + ' · ' + year;
   }
 
+  // When "highlight this crop" is on, show the phenology of that crop only.
+  if (state.isolate) {
+    img = img.updateMask(cropMaskSingle(state.year, state.cropCode));
+    name += ' · ' + cropOrFirst(state.cropCode).name + ' only';
+    title += '  ·  ' + cropOrFirst(state.cropCode).name;
+  }
+
   state.min = min; state.max = max; state.mapPalette = palette; state.colorTitle = title;
   layer.setEeObject(img);
   layer.setVisParams({min: min, max: max, palette: palette});
@@ -864,12 +871,15 @@ var cropSelect = ui.Select({
   items: CROPS.map(function (c) { return {label: c.name, value: String(c.code)}; }),
   value: String(CROPS[0].code),
   style: {stretch: 'horizontal', margin: '2px 0 0 0'},
-  onChange: function (v) { state.cropCode = Number(v); if (state.isolate) updateCropLayer(); }
+  onChange: function (v) {
+    state.cropCode = Number(v);
+    if (state.isolate) { updateCropLayer(); updatePhenology(); }
+  }
 });
 var isolateCheck = ui.Checkbox({
-  label: 'Highlight this crop on the map', value: false,
+  label: 'Highlight this crop (crop map + phenology)', value: false,
   style: {fontSize: '11px', margin: '6px 16px 0 16px', fontFamily: FONT},
-  onChange: function (checked) { state.isolate = checked; updateCropLayer(); }
+  onChange: function (checked) { state.isolate = checked; updateCropLayer(); updatePhenology(); }
 });
 
 // ---- Field profile (click / draw-driven chart + export) ----
