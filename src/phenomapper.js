@@ -85,6 +85,7 @@ var BBCH_STAGES = [
   {value: '0',  code: 0,  label: 'BBCH 00 · Sowing',   short: 'Sowing',    desc: 'Sowing / dry seed'},
   {value: '10', code: 10, label: 'BBCH 10 · Emergence', short: 'Emergence', desc: 'Leaf development — first leaf visible'},
   {value: '51', code: 51, label: 'BBCH 51 · Heading',   short: 'Heading',   desc: 'Inflorescence / heading — flowering onset'},
+  {value: '53', code: 53, label: 'BBCH 53 · Heading +', short: 'Heading+',  desc: 'Inflorescence emergence — heading progressing'},
   {value: '87', code: 87, label: 'BBCH 87 · Ripening',  short: 'Ripening',  desc: 'Hard dough — grain ripening'},
   {value: '89', code: 89, label: 'BBCH 89 · Maturity',  short: 'Maturity',  desc: 'Full ripeness — ready to harvest'}
 ];
@@ -207,9 +208,12 @@ rightMap.layers().add(markerR);
 // ============================================================================
 //  6. STATE
 // ============================================================================
+var YEARS = ['2017', '2018', '2019', '2020', '2021'];
 var state = {
   year: '2017', bbch: '0', cropCode: 1101,
-  palette: DEFAULT_PALETTE, min: 100, max: 250, isolate: false
+  palette: DEFAULT_PALETTE, min: 100, max: 250, isolate: false,
+  allYears: false, opacity: 1,
+  lastGeom: null, lastReducer: null, lastWhere: null   // remembers the current selection
 };
 
 
@@ -353,33 +357,48 @@ function dateDOY(d) {
   return Math.round((d.getTime() - Date.UTC(d.getUTCFullYear(), 0, 1)) / 86400000) + 1;
 }
 
-// Sample crop code + DOY of every stage over a point OR a drawn area.
+function fmtShort(d) {
+  return d.getUTCDate() + ' ' + MONTHS[d.getUTCMonth()] + " '" + String(d.getUTCFullYear()).slice(2);
+}
+
+// Bands to sample for a set of years: crop code + DOY of every BBCH stage.
+function profileBands(years) {
+  var bands = [];
+  years.forEach(function (y) {
+    bands.push(ctmBands(y).reduce(ee.Reducer.firstNonNull()).rename('c_' + y));
+    BBCH_STAGES.forEach(function (s) {
+      bands.push(ee.Image(ASSET_ROOT + y + '_' + s.value).select(DOY_BAND).rename('d_' + y + '_' + s.value));
+    });
+  });
+  return bands;
+}
+
+// Sample crop + DOY of every stage over a point OR a drawn area, for the
+// current year or all five years (crop rotation).
 function runProfile(geometry, reducer, where) {
-  var year = state.year;
+  state.lastGeom = geometry; state.lastReducer = reducer; state.lastWhere = where;
+  var years = state.allYears ? YEARS : [state.year];
   var fc = ee.FeatureCollection([ee.Feature(geometry)]);
   markerL.setEeObject(fc); markerR.setEeObject(fc);
 
   profileTitle.setValue('Sampling ' + where + ' …');
-  seasonInfo.setValue('');
+  seasonInfo.setValue(''); statsPanel.style().set('shown', false);
   downloadLink.style().set('shown', false);
-  chartHolder.widgets().reset([ui.Label('◔  Reading PhenoMapper…',
+  chartHolder.widgets().reset([ui.Label('◔  Reading PhenoMapper' + (state.allYears ? ' · 5 years…' : '…'),
     {fontSize: '12px', color: THEME.sub, margin: '8px 0', fontFamily: FONT})]);
 
-  var bands = [ctmBands(year).reduce(ee.Reducer.firstNonNull()).rename('code')];
-  BBCH_STAGES.forEach(function (s) {
-    bands.push(ee.Image(ASSET_ROOT + year + '_' + s.value).select(DOY_BAND).rename('doy' + s.value));
-  });
-  ee.Image.cat(bands).reduceRegion({
+  ee.Image.cat(profileBands(years)).reduceRegion({
     reducer: reducer, geometry: geometry, scale: 20, maxPixels: 1e9, bestEffort: true
   }).evaluate(function (vals, err) {
-    if (err) {
+    if (err || !vals) {
       profileTitle.setValue('Sampling failed — try another field or area.');
       chartHolder.widgets().reset([msgLabel('Earth Engine could not read this location. ' +
         'Zoom in and click a clear crop field.')]);
-      seasonInfo.setValue(''); downloadLink.style().set('shown', false);
+      seasonInfo.setValue(''); statsPanel.style().set('shown', false);
+      downloadLink.style().set('shown', false);
       return;
     }
-    renderProfile(vals, where, year, geometry);
+    renderProfile(vals, where, years, geometry);
   });
 }
 
@@ -388,123 +407,176 @@ function handleClick(coords) {
              'field at ' + coords.lat.toFixed(4) + '°N, ' + coords.lon.toFixed(4) + '°E');
 }
 
-function renderProfile(vals, where, year, geom) {
-  if (!vals) {
-    profileTitle.setValue('No data · ' + where);
-    chartHolder.widgets().reset([msgLabel('No PhenoMapper data here. Zoom in and select a field.')]);
-    seasonInfo.setValue(''); downloadLink.style().set('shown', false);
-    return;
-  }
-  var crop = (vals.code !== null && vals.code !== undefined) ? findCrop(Math.round(vals.code)) : null;
+// Turn one year's sampled values into a smoothed BBCH season, or null.
+function buildSeason(vals, y) {
+  var codeVal = vals['c_' + y];
+  var crop = (codeVal !== null && codeVal !== undefined) ? findCrop(Math.round(codeVal)) : null;
 
-  // Valid stages only (a field may be masked for some stages).
   var stages = [];
   BBCH_STAGES.forEach(function (s) {
-    var v = vals['doy' + s.value];
+    var v = vals['d_' + y + '_' + s.value];
     if (v !== null && v !== undefined) stages.push({code: s.code, short: s.short, doy: v});
   });
-  if (stages.length < 2) {
-    profileTitle.setValue((crop ? crop.name : 'Selection') + ' · ' + where);
-    chartHolder.widgets().reset([msgLabel('Not enough phenology stages here. ' +
-      'Select a well-defined crop field.')]);
-    seasonInfo.setValue(crop ? seasonSentence(crop) : ''); downloadLink.style().set('shown', false);
-    return;
-  }
+  if (stages.length < 2) return null;
 
-  // Assign a calendar year to each stage: anchor maturity to the season year,
-  // then walk backwards — a stage whose DOY falls LATER than the next stage
-  // belongs to the previous year, so winter-crop sowing/emergence land in the
-  // previous autumn automatically (summer crops stay in-year).
+  // Anchor maturity to the season year, walk backward so winter sowing/emergence
+  // fall into the previous autumn (summer crops stay in-year).
   var yrs = [];
   for (var i = stages.length - 1; i >= 0; i--) {
-    yrs[i] = (i === stages.length - 1) ? Number(year)
+    yrs[i] = (i === stages.length - 1) ? Number(y)
       : yrs[i + 1] - (stages[i].doy > stages[i + 1].doy ? 1 : 0);
   }
-
-  var color = (crop && crop.color !== '#FBFB16') ? crop.color : THEME.gold;
   var known = stages.map(function (x, i) {
     return {t: doyToDate(yrs[i], x.doy).getTime(), b: x.code, short: x.short, doy: Math.round(x.doy)};
   }).sort(function (a, b) { return a.t - b.t; });
 
-  var stageAt = {};
-  known.forEach(function (k) { stageAt[k.t] = k; });
+  var stageAt = {}, byCode = {};
+  known.forEach(function (k) { stageAt[k.t] = k; byCode[k.b] = k.t; });
   var t0 = known[0].t, tN = known[known.length - 1].t;
+  var pchip = buildPchip(known.map(function (k) { return k.t; }), known.map(function (k) { return k.b; }));
+  var dstep = 3 * 86400000, times = [];
+  for (var t = t0; t <= tN; t += dstep) times.push(t);
+  if (times[times.length - 1] !== tN) times.push(tN);
 
-  // Smooth, monotone BBCH curve (PCHIP) through the predicted stages, sampled
-  // every 3 days for a clean development curve; stages overlaid as markers.
-  var pchip = buildPchip(known.map(function (k) { return k.t; }),
-                         known.map(function (k) { return k.b; }));
-  function smoothBBCH(tt) { return Math.max(0, Math.min(99, pchipEval(pchip, tt))); }
-  var dstep = 3 * 86400000, denseT = {};
-  for (var t = t0; t <= tN; t += dstep) denseT[t] = true;
-  known.forEach(function (k) { denseT[k.t] = true; });
-  var sortedT = Object.keys(denseT).map(Number).sort(function (a, b) { return a - b; });
+  return {
+    year: y, crop: crop, color: crop ? crop.color : THEME.gold,
+    known: known, stageAt: stageAt, byCode: byCode, times: times, t0: t0, tN: tN,
+    smooth: function (tt) { return Math.max(0, Math.min(99, pchipEval(pchip, tt))); }
+  };
+}
 
-  var data = [['Date', 'BBCH development', 'Predicted stage']];
-  sortedT.forEach(function (tt) {
-    var s = stageAt[tt];
-    data.push([new Date(tt), Math.round(smoothBBCH(tt) * 10) / 10, s ? s.b : null]);
+function renderProfile(vals, where, years, geom) {
+  var multi = years.length > 1;
+  var seasons = [];
+  years.forEach(function (y) { var s = buildSeason(vals, y); if (s) seasons.push(s); });
+
+  if (!seasons.length) {
+    profileTitle.setValue('No phenology · ' + where);
+    chartHolder.widgets().reset([msgLabel('No clear phenology at this location. ' +
+      'Zoom in and click a crop field.')]);
+    seasonInfo.setValue(''); statsPanel.style().set('shown', false);
+    downloadLink.style().set('shown', false);
+    return;
+  }
+
+  // Columns: Date + one crop-coloured development column per season + markers.
+  var header = ['Date'];
+  seasons.forEach(function (s) {
+    header.push(multi ? (s.year + ' · ' + (s.crop ? s.crop.name : 'unknown'))
+                      : (s.crop ? s.crop.name : 'Field'));
+  });
+  header.push('BBCH stage');
+
+  var timeSet = {};
+  seasons.forEach(function (s) { s.times.forEach(function (t) { timeSet[t] = true; }); });
+  var allT = Object.keys(timeSet).map(Number).sort(function (a, b) { return a - b; });
+
+  // Use NaN (not null) for out-of-season cells: NaN infers as a numeric column
+  // in arrayToDataTable and renders as a gap, whereas null breaks type
+  // inference when a later season's column is empty in the first row.
+  var data = [header];
+  allT.forEach(function (tt) {
+    var row = [new Date(tt)], marker = NaN;
+    seasons.forEach(function (s) {
+      if (tt >= s.t0 && tt <= s.tN) {
+        row.push(Math.round(s.smooth(tt) * 10) / 10);
+        if (s.stageAt[tt]) marker = s.stageAt[tt].b;
+      } else { row.push(NaN); }
+    });
+    row.push(marker);
+    data.push(row);
   });
 
-  var seasonYears = new Date(t0).getUTCFullYear() + '–' + new Date(tN).getUTCFullYear();
+  // Each season coloured by its crop; the marker series is brand green.
+  var series = {};
+  seasons.forEach(function (s, i) { series[i] = {color: s.color, lineWidth: 3, pointSize: 0}; });
+  series[seasons.length] = {color: THEME.brand, lineWidth: 0, pointSize: multi ? 6 : 11};
+
+  var span = new Date(seasons[0].t0).getUTCFullYear() + '–' +
+             new Date(seasons[seasons.length - 1].tN).getUTCFullYear();
   var chart = ui.Chart(data, 'LineChart', {
-    title: (crop ? crop.name : 'Unknown crop') + ' — smoothed BBCH time series (' + seasonYears + ')',
+    title: (multi ? 'Crop rotation & BBCH phenology' : (seasons[0].crop ? seasons[0].crop.name : 'Field')) +
+           ' — ' + span,
     titleTextStyle: {fontSize: 13, bold: true, color: THEME.brand},
-    fontName: 'Roboto', interpolateNulls: true, curveType: 'function',
-    hAxis: {title: 'Date (PhenoMapper prediction)', format: 'MMM ‘yy',
+    fontName: 'Roboto', interpolateNulls: false, curveType: 'function',
+    hAxis: {title: 'Date (PhenoMapper prediction)', format: multi ? 'yyyy' : "MMM ''yy",
             titleTextStyle: {italic: false, fontSize: 11}, gridlines: {color: '#eeeeee'}},
     vAxis: {title: 'BBCH growth stage', titleTextStyle: {italic: false, fontSize: 11},
             viewWindow: {min: -4, max: 99}, gridlines: {color: '#f4f4f4'},
             ticks: [{v: 0, f: '00 Sow'}, {v: 10, f: '10 Emg'}, {v: 30, f: '30 Stem'},
                     {v: 51, f: '51 Head'}, {v: 65, f: '65 Flwr'}, {v: 87, f: '87 Ripe'},
                     {v: 89, f: '89 Mat'}]},
-    series: {0: {color: color, lineWidth: 3, pointSize: 0},
-             1: {color: THEME.brand, lineWidth: 0, pointSize: 11}},
-    legend: {position: 'none'}, chartArea: {left: 66, right: 14, top: 34, bottom: 44}
+    series: series,
+    legend: multi ? {position: 'top', maxLines: 3, textStyle: {fontSize: 9}} : {position: 'none'},
+    chartArea: {left: 66, right: 14, top: multi ? 56 : 34, bottom: 44}
   });
-  chart.style().set({height: '250px', stretch: 'horizontal', margin: '4px 0 0 0'});
+  chart.style().set({height: multi ? '290px' : '250px', stretch: 'horizontal', margin: '4px 0 0 0'});
 
-  profileTitle.setValue((crop ? crop.name : 'Selection') + ' · season ' + seasonYears +
-                        '  (' + where + ')');
-  seasonInfo.setValue(crop ? seasonSentence(crop)
-    : 'Crop type mixed/unknown here — stages ordered by development.');
+  profileTitle.setValue((multi ? seasons.length + ' seasons' :
+    (seasons[0].crop ? seasons[0].crop.name : 'Field')) + '  (' + where + ')');
   chartHolder.widgets().reset([chart]);
 
-  // ---- CSV export via Earth Engine (works in the published app) ----
-  // Every property is a STRING (so each CSV column has one type) and every
-  // feature carries a real point geometry. Mixed column types, null geometries,
-  // or a non-ASCII filename all make the server-side table export fail (500),
-  // so the filename and season string below are sanitised to plain ASCII.
-  var seasonAscii = new Date(t0).getUTCFullYear() + '-' + new Date(tN).getUTCFullYear();
-  var fname = ('phenomapper_' + (crop ? crop.name : 'field') + '_' + seasonAscii)
-                .replace(/[^A-Za-z0-9]+/g, '_');
-  var exportGeom = ee.Geometry(geom).centroid(1);
-  var COLS = ['date', 'day_of_year', 'bbch_smoothed', 'predicted_stage_bbch',
-              'stage_name', 'crop', 'season', 'season_type'];
-  var fc = ee.FeatureCollection(sortedT.map(function (tt) {
-    var d = new Date(tt), s = stageAt[tt];
-    return ee.Feature(exportGeom, {
-      date: d.toISOString().slice(0, 10),
-      day_of_year: String(dateDOY(d)),
-      bbch_smoothed: String(Math.round(smoothBBCH(tt) * 10) / 10),
-      predicted_stage_bbch: s ? String(s.b) : 'NA',
-      stage_name: s ? s.short : 'NA',
-      crop: crop ? crop.name : 'unknown',
-      season: seasonAscii,
-      season_type: crop ? crop.season : 'unknown'
-    });
-  }));
-  downloadLink.setValue('◔  Preparing CSV…');
-  downloadLink.setUrl('');
-  downloadLink.style().set('shown', true);
-  function onUrl(url) {
-    downloadLink.setUrl(url);
-    downloadLink.setValue('⤓ Download CSV — ' + fname + '.csv');
+  // Info / per-season stats.
+  statsPanel.clear();
+  if (multi) {
+    seasonInfo.setValue('Each line is coloured by that year’s crop (crop rotation). ' +
+      'Markers = predicted BBCH stages.');
+    seasons.forEach(function (s) { statsPanel.add(statsRow(s)); });
+    statsPanel.style().set('shown', true);
+  } else {
+    seasonInfo.setValue(seasons[0].crop ? seasonSentence(seasons[0].crop)
+      : 'Crop type mixed/unknown here — stages ordered by development.');
+    statsPanel.style().set('shown', false);
   }
+
+  buildDownload(seasons, where, geom, span);
+}
+
+// One coloured summary line per season (crop, emergence→maturity, length).
+function statsRow(s) {
+  var e = s.byCode[10] ? new Date(s.byCode[10]) : null;
+  var m = s.byCode[89] ? new Date(s.byCode[89]) : null;
+  var len = (e && m) ? Math.round((m.getTime() - e.getTime()) / 86400000) : null;
+  var swatch = ui.Label('', {backgroundColor: s.color, padding: '5px', margin: '3px 6px 0 16px',
+                             border: '1px solid rgba(0,0,0,0.25)'});
+  var txt = s.year + ' · ' + (s.crop ? s.crop.name : 'unknown') +
+    (e ? ('  emrg ' + fmtShort(e)) : '') + (m ? (' → mat ' + fmtShort(m)) : '') +
+    (len != null ? ('  (' + len + ' d)') : '');
+  return ui.Panel([swatch, ui.Label(txt, {fontSize: '10px', color: THEME.ink, margin: '3px 16px 0 0',
+    fontFamily: FONT, whiteSpace: 'normal', stretch: 'horizontal'})],
+    ui.Panel.Layout.flow('horizontal'), {margin: '0', stretch: 'horizontal'});
+}
+
+// CSV export (all seasons) via Earth Engine — strings + real geometry + ASCII
+// filename so the server-side table export cannot fail with a 500.
+function buildDownload(seasons, where, geom, span) {
+  var namePart = seasons.length > 1 ? 'rotation' : (seasons[0].crop ? seasons[0].crop.name : 'field');
+  var fname = ('phenomapper_' + namePart + '_' + span).replace(/[^A-Za-z0-9]+/g, '_');
+  var exportGeom = ee.Geometry(geom).centroid(1);
+  var COLS = ['date', 'year', 'crop', 'day_of_year', 'bbch_smoothed',
+              'predicted_stage_bbch', 'stage_name', 'season_type'];
+  var feats = [];
+  seasons.forEach(function (s) {
+    s.times.forEach(function (tt) {
+      var d = new Date(tt), st = s.stageAt[tt];
+      feats.push(ee.Feature(exportGeom, {
+        date: d.toISOString().slice(0, 10),
+        year: String(s.year),
+        crop: s.crop ? s.crop.name : 'unknown',
+        day_of_year: String(dateDOY(d)),
+        bbch_smoothed: String(Math.round(s.smooth(tt) * 10) / 10),
+        predicted_stage_bbch: st ? String(st.b) : 'NA',
+        stage_name: st ? st.short : 'NA',
+        season_type: s.crop ? s.crop.season : 'unknown'
+      }));
+    });
+  });
+  downloadLink.setValue('◔  Preparing CSV…'); downloadLink.setUrl('');
+  downloadLink.style().set('shown', true);
+  function onUrl(url) { downloadLink.setUrl(url); downloadLink.setValue('⤓ Download CSV — ' + fname + '.csv'); }
   function onFail() { downloadLink.setValue('⚠ CSV export failed — try another field.'); }
-  // Handle every getDownloadURL form: async callback, sync return, or a throw.
   try {
-    var maybeUrl = fc.getDownloadURL('CSV', COLS, fname, function (url, err) {
+    var maybeUrl = ee.FeatureCollection(feats).getDownloadURL('CSV', COLS, fname, function (url, err) {
       if (url && !err) { onUrl(url); } else { onFail(); }
     });
     if (typeof maybeUrl === 'string' && maybeUrl) { onUrl(maybeUrl); }
@@ -549,8 +621,10 @@ function clearSelection() {
   [dtLeft, dtRight].forEach(function (dt) { dt.layers().reset(); dt.stop(); dt.setShape(null); });
   markerL.setEeObject(ee.FeatureCollection([]));
   markerR.setEeObject(ee.FeatureCollection([]));
+  state.lastGeom = null; state.lastReducer = null; state.lastWhere = null;
   profileTitle.setValue('No field selected yet.');
   seasonInfo.setValue(''); downloadLink.style().set('shown', false);
+  statsPanel.clear(); statsPanel.style().set('shown', false);
   chartHolder.widgets().reset([]);
 }
 
@@ -648,7 +722,7 @@ var schematicAxis = ui.Panel([
 var schematicCaption = bodyText(
   'BBCH principal stages 0–9: germination → leaf development → tillering → stem ' +
   'elongation → booting → heading → flowering → milk/dough → ripening → ' +
-  'senescence. ▲ = stages PhenoMapper predicts (00, 10, 51, 87, 89).',
+  'senescence. ▲ = stages PhenoMapper predicts (00, 10, 51, 53, 87, 89).',
   {fontSize: '10px', margin: '6px 16px 0 16px'});
 
 // ---- Controls ----
@@ -676,6 +750,11 @@ var paletteSelect = ui.Select({
   style: {stretch: 'horizontal', margin: '2px 0 0 0'},
   onChange: function (v) { state.palette = v; applyPalette(); }
 });
+var opacitySlider = ui.Slider({
+  min: 0, max: 1, value: 1, step: 0.05,
+  style: {stretch: 'horizontal', margin: '2px 0 0 0'},
+  onChange: function (v) { state.opacity = v; layer.setOpacity(v); }
+});
 
 // ---- Crop layer highlight ----
 var cropSelect = ui.Select({
@@ -694,8 +773,17 @@ var isolateCheck = ui.Checkbox({
 var profileHint = bodyText(
   '👆 Click any field on either map, or draw an area to average. The chart shows a ' +
   'smoothed BBCH development curve with the predicted stages marked — winter crops ' +
-  'start with sowing in the previous autumn. Use the CSV link to export the series.',
+  'start with sowing in the previous autumn. Tick “all 5 years” to see the full ' +
+  '2017–2021 series, each season coloured by that year’s crop.',
   {fontSize: '11px', margin: '4px 16px 0 16px'});
+var yearsCheck = ui.Checkbox({
+  label: 'Show all 5 years (crop rotation)', value: false,
+  style: {fontSize: '11px', margin: '6px 16px 0 16px', fontFamily: FONT},
+  onChange: function (checked) {
+    state.allYears = checked;
+    if (state.lastGeom) { runProfile(state.lastGeom, state.lastReducer, state.lastWhere); }
+  }
+});
 var drawButton = ui.Button({label: '▢  Draw area (avg)', onClick: startAreaDraw,
   style: {stretch: 'horizontal', margin: '0 4px 0 0'}});
 var clearButton = ui.Button({label: '✕  Clear', onClick: clearSelection,
@@ -703,6 +791,7 @@ var clearButton = ui.Button({label: '✕  Clear', onClick: clearSelection,
 var profileTitle = ui.Label('No field selected yet.', {fontSize: '11px', fontWeight: 'bold',
   color: THEME.ink, margin: '8px 16px 0 16px', fontFamily: FONT, whiteSpace: 'normal'});
 var chartHolder = ui.Panel({style: {margin: '4px 16px 0 16px', stretch: 'horizontal'}});
+var statsPanel = ui.Panel({style: {margin: '2px 0 0 0', stretch: 'horizontal', shown: false}});
 var seasonInfo = ui.Label('', {fontSize: '11px', color: THEME.sub, fontStyle: 'italic',
   margin: '2px 16px 0 16px', fontFamily: FONT, whiteSpace: 'normal'});
 var downloadLink = ui.Label('⤓ Download CSV', {fontSize: '11px', fontWeight: 'bold',
@@ -733,6 +822,7 @@ var controlPanel = ui.Panel({
     labeledSelect('Growth stage (BBCH)', bbchSelect, '8px'),
     stageInfo,
     labeledSelect('Colorbar', paletteSelect, '8px'),
+    labeledSelect('Phenology layer opacity', opacitySlider, '8px'),
     hr(),
     sectionHeader('CROP LAYER'),
     labeledSelect('Crop', cropSelect),
@@ -740,9 +830,10 @@ var controlPanel = ui.Panel({
     hr(),
     sectionHeader('FIELD PROFILE  (click a field or draw an area)'),
     profileHint,
+    yearsCheck,
     ui.Panel([drawButton, clearButton], ui.Panel.Layout.flow('horizontal'),
              {stretch: 'horizontal', margin: '6px 16px 0 16px'}),
-    profileTitle, chartHolder, seasonInfo, downloadLink,
+    profileTitle, chartHolder, statsPanel, seasonInfo, downloadLink,
     hr(),
     sectionHeader('HOW TO READ'),
     howToText,
