@@ -826,14 +826,21 @@ function growthSchematic() {
 
 // A painted crop-growth scene rendered as an image: gradient sky + sun, soil,
 // and wheat plants that grow, sprout leaves, form an awned ear, ripen to gold
-// and senesce — much clearer than bars for understanding the BBCH lifecycle.
+// and senesce. Design coordinates are scaled by S into a valid lon/lat window
+// (must stay within ±180°/±90°, or the geometry is invalid and renders blank).
 function bbchIllustration() {
   try {
-    var W = 184, H = 64, G = 10;
+    var W = 184, H = 64, G = 10, S = 0.4;            // S keeps coords well inside ±90°
+    function rect(x0, y0, x1, y1) {
+      return ee.Geometry.Rectangle([x0 * S, y0 * S, x1 * S, y1 * S]);
+    }
+    function poly(coords) {
+      return ee.Geometry.Polygon([coords.map(function (p) { return [p[0] * S, p[1] * S]; })]);
+    }
     function disc(cx, cy, rad, n) {
-      var pts = []; n = n || 12;
+      var pts = []; n = n || 14;
       for (var a = 0; a < n; a++) { var t = a / n * 2 * Math.PI; pts.push([cx + rad * Math.cos(t), cy + rad * Math.sin(t)]); }
-      return ee.Geometry.Polygon([pts]);
+      return poly(pts);
     }
     var plants = [
       {x: 16,  h: 5,  col: 'green', ear: null},   // germination
@@ -848,18 +855,17 @@ function bbchIllustration() {
         leaves = [], awns = [];
     plants.forEach(function (p) {
       var w = 1.3, top = G + p.h, stemTop = top - (p.ear ? 5 : 0);
-      stems[p.col].push(ee.Geometry.Rectangle([p.x - w, G, p.x + w, stemTop]));
-      if (p.h > 12) {                                  // curved leaf blades
+      stems[p.col].push(rect(p.x - w, G, p.x + w, stemTop));
+      if (p.h > 12) {                                  // leaf blades
         var l1 = G + p.h * 0.32, l2 = G + p.h * 0.58;
-        leaves.push(ee.Geometry.Polygon([[[p.x - w, l1], [p.x - 13, l1 + 7], [p.x - 11, l1 + 2], [p.x - w, l1 - 2]]]));
-        leaves.push(ee.Geometry.Polygon([[[p.x + w, l2], [p.x + 13, l2 + 7], [p.x + 11, l2 + 2], [p.x + w, l2 - 2]]]));
+        leaves.push(poly([[p.x - w, l1], [p.x - 13, l1 + 7], [p.x - 11, l1 + 2], [p.x - w, l1 - 2]]));
+        leaves.push(poly([[p.x + w, l2], [p.x + 13, l2 + 7], [p.x + 11, l2 + 2], [p.x + w, l2 - 2]]));
       }
       if (p.ear) {                                     // spike (ear) body + awns
-        ears[p.ear].push(ee.Geometry.Polygon([[[p.x, stemTop - 1], [p.x - 3, stemTop + 3],
-          [p.x - 2.3, stemTop + 8], [p.x, stemTop + 11], [p.x + 2.3, stemTop + 8], [p.x + 3, stemTop + 3]]]));
+        ears[p.ear].push(poly([[p.x, stemTop - 1], [p.x - 3, stemTop + 3], [p.x - 2.3, stemTop + 8],
+          [p.x, stemTop + 11], [p.x + 2.3, stemTop + 8], [p.x + 3, stemTop + 3]]));
         [-2.2, 0, 2.2].forEach(function (dx) {
-          awns.push(ee.Geometry.Polygon([[[p.x + dx, stemTop + 9], [p.x + dx - 0.5, stemTop + 16],
-            [p.x + dx + 0.5, stemTop + 16]]]));
+          awns.push(poly([[p.x + dx, stemTop + 9], [p.x + dx - 0.5, stemTop + 15], [p.x + dx + 0.5, stemTop + 15]]));
         });
       }
     });
@@ -870,12 +876,13 @@ function bbchIllustration() {
       egreen: [140, 190, 78], egold: [224, 188, 26], etan: [190, 154, 104],
       leaf: [86, 168, 74], awn: [232, 206, 120], sun: [255, 216, 96]
     };
+    var Gg = G * S, Hg = H * S;
     var lat = ee.Image.pixelLonLat().select('latitude');
     function mix(f, c1, c2) {
       return ee.Image.cat([0, 1, 2].map(function (i) { return f.multiply(c1[i] - c2[i]).add(c2[i]); })).toByte();
     }
-    var img = mix(lat.subtract(G).divide(H - G).clamp(0, 1), C.skyTop, C.skyLow);   // sky
-    img = img.where(lat.lt(G), mix(lat.divide(G).clamp(0, 1), C.soil, C.soilLow));  // soil
+    var img = mix(lat.subtract(Gg).divide(Hg - Gg).clamp(0, 1), C.skyTop, C.skyLow);  // sky
+    img = img.where(lat.lt(Gg), mix(lat.divide(Gg).clamp(0, 1), C.soil, C.soilLow));  // soil
     function stamp(image, list, color) {
       if (!list.length) return image;
       var m = ee.Image(0).byte().paint(ee.FeatureCollection(list), 1);
@@ -892,7 +899,7 @@ function bbchIllustration() {
     img = stamp(img, ears.tan, C.etan);
     return ui.Thumbnail({
       image: img.visualize({min: 0, max: 255}),
-      params: {dimensions: '368x128', region: ee.Geometry.Rectangle([0, 0, W, H]), format: 'png'},
+      params: {dimensions: '368x128', region: rect(0, 0, W, H), format: 'png'},
       style: {stretch: 'horizontal', maxHeight: '124px', margin: '8px 16px 0 16px',
               border: '1px solid ' + THEME.line}
     });
