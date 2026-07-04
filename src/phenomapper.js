@@ -195,15 +195,10 @@ function cropMaskSingle(year, code) {
   return ctmYearImg(year).eq(Number(code)).selfMask();
 }
 
-// Aggregate 20 m data to the map's *current* display resolution (mean for
-// continuous layers, mode for categorical). This fills sparse fields at low
-// zoom — instead of scattered pixels — and adapts automatically as you zoom,
-// WITHOUT reproject() (which would lock the zoom and cause an event loop) and
-// without any zoom listener.
-function smoothDisplay(img, reducer) {
-  return img.setDefaultProjection('EPSG:3857', null, 20)
-            .reduceResolution({reducer: reducer, maxPixels: 1024, bestEffort: true});
-}
+// NOTE: display images are shown at native resolution. Adaptive low-zoom
+// smoothing (reduceResolution) either needs reproject() — which locks the map
+// zoom and triggers an event loop — or renders blank without it, so it is not
+// used. Earth Engine's own pyramiding handles zoomed-out display.
 
 
 // ============================================================================
@@ -334,13 +329,13 @@ function meanImg(stage) {
 function updateCropLayer() {
   if (state.isolate) {
     var crop = cropOrFirst(state.cropCode);
-    layer_Crop.setEeObject(smoothDisplay(cropMaskSingle(state.year, state.cropCode), ee.Reducer.mean()));
-    layer_Crop.setVisParams({min: 0.001, max: 1, palette: [crop.color]});
+    layer_Crop.setEeObject(cropMaskSingle(state.year, state.cropCode));
+    layer_Crop.setVisParams({min: 1, max: 1, palette: [crop.color]});
     layer_Crop.setName('Crop · ' + crop.name + ' · ' + state.year);
     renderCropLegend(crop.name + ' — ' + state.year);
   } else {
     var img = remapper(ctmYearImg(state.year)).updateMask(focusMaskImg(state.year));
-    layer_Crop.setEeObject(smoothDisplay(img, ee.Reducer.mode()));
+    layer_Crop.setEeObject(img);
     layer_Crop.setVisParams({min: 1, max: 8, palette: dict.colors});
     layer_Crop.setName('Crop Type Map · 10 m · ' + state.year);
     renderCropLegend('Crop Type — ' + state.year);
@@ -387,7 +382,7 @@ function updatePhenology() {
   }
 
   state.mapPalette = palette; state.colorTitle = title;
-  layer.setEeObject(smoothDisplay(base, ee.Reducer.mean()));
+  layer.setEeObject(base);
   layer.setName(name);
   layer.setOpacity(state.opacity);
 

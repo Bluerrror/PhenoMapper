@@ -26,7 +26,6 @@ The app lets you:
 - 📅 Switch between years (2017–2021) and BBCH stages (00, 10, 51, 53, 87, 89), with a **layer-opacity slider**.
 - 🎨 Choose a **scientific colorbar** (Viridis · Turbo · Magma · Seasonal); ranges use a **2–98% percentile stretch** (cached per view) with Day-of-Year **and** month tick labels, and a diverging palette for anomalies.
 - 🖍️ **Highlight one crop** to show *only* that crop on **both** the crop-type map and the phenology map.
-- 🔍 **Zoom-aware rendering:** at national zoom the maps aggregate to a coarse grid, so they stay fast and fields fill in smoothly instead of appearing as scattered pixels; full resolution returns as you zoom in.
 - 🖱️ **Click any field** — or **draw an area to average** — to read that field’s phenology.
 - 📈 See a **smoothed BBCH development curve** (monotone-cubic PCHIP) on a real calendar-date axis, with **winter crops correctly starting in the previous autumn**.
 - 🔁 Toggle a **full 5-year time series (2017–2021)** where **each season is coloured by that year’s crop**, revealing crop rotation, plus a per-season summary (crop, emergence → maturity, growing-season length).
