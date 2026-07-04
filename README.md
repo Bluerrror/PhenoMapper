@@ -22,13 +22,15 @@ Companion web-app for the paper _“A novel fusion of Sentinel-1 and Sentinel-2 
 The app lets you:
 
 - 🗺️ Compare a **Crop Type Map** (left) against the **predicted Day-of-Year** of any growth stage (right) in a synced, wipeable split map.
-- 📅 Switch between years (2017–2021) and BBCH stages (sowing → emergence → heading → ripening → maturity), with a **layer-opacity slider**.
-- 🎨 Choose a **scientific colorbar** (Viridis · Turbo · Magma · Seasonal) with Day-of-Year **and** month tick labels.
+- 🧮 Choose the **right-map layer**: single-stage Day-of-Year, **growing-season length** (emergence→maturity, in days), **5-year mean**, or **anomaly** (year − 5-year mean) — all derived on the fly from the data.
+- 📅 Switch between years (2017–2021) and BBCH stages (00, 10, 51, 53, 87, 89), with a **layer-opacity slider**.
+- 🎨 Choose a **scientific colorbar** (Viridis · Turbo · Magma · Seasonal) with Day-of-Year **and** month tick labels; anomaly maps use a diverging palette.
 - 🖱️ **Click any field** — or **draw an area to average** — to read that field’s phenology.
 - 📈 See a **smoothed BBCH development curve** (monotone-cubic PCHIP) on a real calendar-date axis, with **winter crops correctly starting in the previous autumn**.
 - 🔁 Toggle a **full 5-year time series (2017–2021)** where **each season is coloured by that year’s crop**, revealing crop rotation, plus a per-season summary (crop, emergence → maturity, growing-season length).
 - ⬇️ **Export the full time series to CSV** for the selected point or area (all years).
-- 🌱 Learn the scale from a built-in **BBCH growth-stage schematic**.
+- 🌱 Understand the scale from a **generated crop-growth illustration** (germination → heading → ripening → senescence).
+- ⚡ **Instant** year / stage / mode switching — colorbar ranges are set from per-stage defaults instead of a per-change server query.
 
 ---
 
@@ -52,8 +54,8 @@ To publish your own copy, open [`src/phenomapper.js`](src/phenomapper.js) in the
 
 | Panel | What it does |
 |---|---|
-| **What is BBCH?** | A canopy-silhouette schematic of the BBCH principal stages 0–9 (germination → senescence); the five stages PhenoMapper predicts are flagged with ▲. |
-| **Explore** | Year selector, BBCH stage selector (human-readable names), and a scientific colorbar switcher. The Day-of-Year colorbar shows both DOY values and approximate months, rescaled per stage using the 2–98th percentile. |
+| **What is BBCH?** | A **generated crop-growth illustration** — plants rising from the soil, forming an ear, ripening to gold and senescing — that conveys the BBCH lifecycle at a glance. |
+| **Explore** | Year selector, BBCH stage selector, **right-map layer mode** (Day-of-Year · season length · 5-year mean · anomaly), scientific colorbar switcher, and a layer-opacity slider. Colorbar ranges come from fast per-stage defaults, so switching is instant. |
 | **Crop layer** | Pick a crop and optionally **highlight it alone** on the Crop Type Map. |
 | **Field profile** | Click a field or draw a polygon (area average). A **monotone-cubic (PCHIP)** smoothed curve plots BBCH stage vs. calendar date; predicted stages are overlaid as markers. Tick **“Show all 5 years”** to stack 2017–2021 on one axis with **each season coloured by that year’s crop** (crop rotation), plus a coloured per-season summary. |
 | **Download CSV** | Exports the full series (`date, year, crop, day_of_year, bbch_smoothed, predicted_stage_bbch, stage_name, season_type`) for the selected point/area via a real Earth Engine download URL. |

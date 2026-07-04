@@ -81,13 +81,29 @@ var DEFAULT_PALETTE = 'Viridis (default)';
 // ============================================================================
 //  3. BBCH GROWTH STAGES  (predicted by PhenoMapper)
 // ============================================================================
+// min/max = typical Day-of-Year range per stage → the colorbar is set instantly
+// (no server-side percentile), which keeps year/stage switching very fast.
 var BBCH_STAGES = [
-  {value: '0',  code: 0,  label: 'BBCH 00 · Sowing',   short: 'Sowing',    desc: 'Sowing / dry seed'},
-  {value: '10', code: 10, label: 'BBCH 10 · Emergence', short: 'Emergence', desc: 'Leaf development — first leaf visible'},
-  {value: '51', code: 51, label: 'BBCH 51 · Heading',   short: 'Heading',   desc: 'Inflorescence / heading — flowering onset'},
-  {value: '53', code: 53, label: 'BBCH 53 · Heading +', short: 'Heading+',  desc: 'Inflorescence emergence — heading progressing'},
-  {value: '87', code: 87, label: 'BBCH 87 · Ripening',  short: 'Ripening',  desc: 'Hard dough — grain ripening'},
-  {value: '89', code: 89, label: 'BBCH 89 · Maturity',  short: 'Maturity',  desc: 'Full ripeness — ready to harvest'}
+  {value: '0',  code: 0,  label: 'BBCH 00 · Sowing',   short: 'Sowing',    desc: 'Sowing / dry seed', min: 60,  max: 320},
+  {value: '10', code: 10, label: 'BBCH 10 · Emergence', short: 'Emergence', desc: 'Leaf development — first leaf visible', min: 90, max: 330},
+  {value: '51', code: 51, label: 'BBCH 51 · Heading',   short: 'Heading',   desc: 'Inflorescence / heading — flowering onset', min: 120, max: 215},
+  {value: '53', code: 53, label: 'BBCH 53 · Heading +', short: 'Heading+',  desc: 'Inflorescence emergence — heading progressing', min: 120, max: 220},
+  {value: '87', code: 87, label: 'BBCH 87 · Ripening',  short: 'Ripening',  desc: 'Hard dough — grain ripening', min: 175, max: 238},
+  {value: '89', code: 89, label: 'BBCH 89 · Maturity',  short: 'Maturity',  desc: 'Full ripeness — ready to harvest', min: 185, max: 255}
+];
+function stageRange(code) {
+  for (var i = 0; i < BBCH_STAGES.length; i++)
+    if (BBCH_STAGES[i].value === String(code)) return {min: BBCH_STAGES[i].min, max: BBCH_STAGES[i].max};
+  return {min: 100, max: 250};
+}
+// Diverging palette for anomaly maps (earlier ← blue · white · red → later).
+var DIVERGING = ['#2166ac', '#67a9cf', '#d1e5f0', '#f7f7f7', '#fddbc7', '#ef8a62', '#b2182b'];
+// Right-map layer modes (derived products from the phenology data).
+var MAP_MODES = [
+  {value: 'doy',  label: 'BBCH stage · Day of Year'},
+  {value: 'gsl',  label: 'Season length (emergence→maturity)'},
+  {value: 'mean', label: '5-year mean · this stage'},
+  {value: 'anom', label: 'Anomaly (year − 5-yr mean)'}
 ];
 function bbchLabel(code) {
   for (var i = 0; i < BBCH_STAGES.length; i++)
@@ -212,7 +228,8 @@ var YEARS = ['2017', '2018', '2019', '2020', '2021'];
 var state = {
   year: '2017', bbch: '0', cropCode: 1101,
   palette: DEFAULT_PALETTE, min: 100, max: 250, isolate: false,
-  allYears: false, opacity: 1,
+  allYears: false, opacity: 1, mode: 'doy',
+  mapPalette: PALETTES[DEFAULT_PALETTE], colorTitle: 'Day of Year',
   lastGeom: null, lastReducer: null, lastWhere: null   // remembers the current selection
 };
 
@@ -266,13 +283,13 @@ var colorBar = ui.Panel({
           backgroundColor: 'rgba(255,255,255,0.94)', border: '1px solid ' + THEME.line}
 });
 function renderColorBar() {
-  var p = PALETTES[state.palette];
   colorBar.clear();
-  colorBar.add(ui.Label('Day of Year — ' + bbchLabel(state.bbch), {
+  colorBar.add(ui.Label(state.colorTitle, {
     fontWeight: 'bold', fontSize: '14px', color: THEME.brand, margin: '0 0 6px 0', fontFamily: FONT}));
-  colorBar.add(colorBarThumb(p));
+  colorBar.add(colorBarThumb(state.mapPalette));
   colorBar.add(tickRow(state.min, state.max, false));
-  colorBar.add(tickRow(state.min, state.max, true));
+  // Month row only makes sense for Day-of-Year scales, not day-count/anomaly.
+  if (state.mode === 'doy' || state.mode === 'mean') colorBar.add(tickRow(state.min, state.max, true));
 }
 rightMap.add(colorBar);
 
@@ -280,9 +297,11 @@ rightMap.add(colorBar);
 // ============================================================================
 //  8. MAP UPDATE LOGIC
 // ============================================================================
-function applyPalette() {
-  layer.setVisParams({min: state.min, max: state.max, palette: PALETTES[state.palette]});
-  renderColorBar();
+function phenoImg(year, stage) {
+  return ee.Image(ASSET_ROOT + year + '_' + stage).select(DOY_BAND);
+}
+function meanImg(stage) {
+  return ee.ImageCollection(YEARS.map(function (y) { return phenoImg(y, stage); })).mean();
 }
 function updateCropLayer() {
   if (state.isolate) {
@@ -298,21 +317,39 @@ function updateCropLayer() {
     renderCropLegend('Crop Type — ' + state.year);
   }
 }
+// Build the right-map image + colorbar for the current mode. No server round-trip
+// (fixed per-stage ranges) so year / stage / mode / palette changes are instant.
 function updatePhenology() {
-  var img = ee.Image(ASSET_ROOT + state.year + '_' + state.bbch);
+  var year = state.year, stage = state.bbch, r = stageRange(stage);
+  var img, min, max, palette = PALETTES[state.palette], title, name;
+
+  if (state.mode === 'gsl') {                       // emergence → maturity, in days
+    var gsl = phenoImg(year, '89').subtract(phenoImg(year, '10'));
+    gsl = gsl.where(gsl.lt(0), gsl.add(365));       // wrap winter crops across new year
+    img = gsl; min = 80; max = 300;
+    title = 'Season length · days — ' + year;
+    name = 'Season length (10→89) · ' + year;
+  } else if (state.mode === 'mean') {               // 5-year mean DOY for this stage
+    img = meanImg(stage); min = r.min; max = r.max;
+    title = '5-yr mean DOY — ' + bbchLabel(stage);
+    name = '5-yr mean DOY · ' + bbchLabel(stage);
+  } else if (state.mode === 'anom') {               // this year − 5-year mean
+    img = phenoImg(year, stage).subtract(meanImg(stage)); min = -20; max = 20;
+    palette = DIVERGING;
+    title = 'Anomaly · days — ' + bbchLabel(stage) + ' · ' + year;
+    name = 'Anomaly vs 5-yr mean · ' + bbchLabel(stage) + ' · ' + year;
+  } else {                                          // default: single-stage DOY
+    img = phenoImg(year, stage); min = r.min; max = r.max;
+    title = 'Day of Year — ' + bbchLabel(stage);
+    name = 'Phenology · DOY · ' + bbchLabel(stage) + ' · ' + year;
+  }
+
+  state.min = min; state.max = max; state.mapPalette = palette; state.colorTitle = title;
   layer.setEeObject(img);
-  layer.setName('Phenology · DOY · ' + bbchLabel(state.bbch) + ' · ' + state.year);
-  var pct = img.reduceRegion({
-    reducer: ee.Reducer.percentile([2, 98]).setOutputs(['min', 'max']),
-    geometry: AOI, scale: 5000, bestEffort: true
-  });
-  ee.Dictionary({
-    minVal: pct.getNumber(DOY_BAND + '_min').round(),
-    maxVal: pct.getNumber(DOY_BAND + '_max').round()
-  }).evaluate(function (d) {
-    if (d && d.minVal !== null && d.maxVal !== null) { state.min = d.minVal; state.max = d.maxVal; }
-    applyPalette();
-  });
+  layer.setVisParams({min: min, max: max, palette: palette});
+  layer.setName(name);
+  layer.setOpacity(state.opacity);
+  renderColorBar();
 }
 
 
@@ -713,6 +750,67 @@ function growthSchematic() {
   return ui.Panel(cols, ui.Panel.Layout.flow('horizontal'),
                   {margin: '8px 16px 0 16px', stretch: 'horizontal'});
 }
+
+// A painted crop-growth illustration (soil + plants that grow, form an ear,
+// ripen to gold, then senesce) rendered as a crisp image — clearer than bars.
+function bbchIllustration() {
+  try {
+    var W = 168, H = 52, G = 8;                     // canvas + ground level
+    var plants = [
+      {x: 14,  h: 3,  stem: 'green', ear: null},    // germination
+      {x: 36,  h: 11, stem: 'green', ear: null},    // leaf development
+      {x: 58,  h: 18, stem: 'green', ear: null},    // tillering
+      {x: 80,  h: 28, stem: 'green', ear: null},    // stem elongation
+      {x: 102, h: 36, stem: 'green', ear: 'green'}, // heading
+      {x: 124, h: 36, stem: 'gold',  ear: 'gold'},  // ripening
+      {x: 146, h: 27, stem: 'tan',   ear: 'tan'}    // senescence
+    ];
+    var stems = {green: [], gold: [], tan: []},
+        ears  = {green: [], gold: [], tan: []}, leaves = [];
+    plants.forEach(function (p) {
+      var w = 1.5;
+      stems[p.stem].push(ee.Geometry.Rectangle([p.x - w, G, p.x + w, G + p.h]));
+      if (p.h > 12) {
+        var ly = G + p.h * 0.45;
+        leaves.push(ee.Geometry.Polygon([[[p.x - w, ly], [p.x - 9, ly + 4], [p.x - w, ly + 6]]]));
+        leaves.push(ee.Geometry.Polygon([[[p.x + w, ly - 2], [p.x + 9, ly + 2], [p.x + w, ly + 4]]]));
+      }
+      if (p.ear) {
+        var ty = G + p.h, ew = 3.4, eh = 9;
+        ears[p.ear].push(ee.Geometry.Polygon([[[p.x, ty], [p.x - ew, ty + eh * 0.45],
+          [p.x, ty + eh], [p.x + ew, ty + eh * 0.45]]]));
+      }
+    });
+    var C = {
+      sky: [233, 243, 236], soil: [123, 92, 68],
+      green: [67, 160, 71], gold: [201, 162, 39], tan: [161, 112, 74],
+      egreen: [124, 179, 66], egold: [212, 182, 6], etan: [173, 138, 94], leaf: [76, 154, 66]
+    };
+    var lat = ee.Image.pixelLonLat().select('latitude');
+    var img = ee.Image.constant(C.sky).toByte();
+    img = img.where(lat.lt(G), ee.Image.constant(C.soil).toByte());
+    function stamp(image, list, color) {
+      if (!list.length) return image;
+      var m = ee.Image(0).byte().paint(ee.FeatureCollection(list), 1);
+      return image.where(m, ee.Image.constant(color).toByte());
+    }
+    img = stamp(img, leaves, C.leaf);
+    img = stamp(img, stems.green, C.green);
+    img = stamp(img, stems.gold, C.gold);
+    img = stamp(img, stems.tan, C.tan);
+    img = stamp(img, ears.green, C.egreen);
+    img = stamp(img, ears.gold, C.egold);
+    img = stamp(img, ears.tan, C.etan);
+    return ui.Thumbnail({
+      image: img.visualize({min: 0, max: 255}),
+      params: {dimensions: '340x104', region: ee.Geometry.Rectangle([0, 0, W, H]), format: 'png'},
+      style: {stretch: 'horizontal', maxHeight: '112px', margin: '8px 16px 0 16px',
+              border: '1px solid ' + THEME.line}
+    });
+  } catch (e) {
+    return growthSchematic();   // fall back to the bar schematic if anything fails
+  }
+}
 var schematicAxis = ui.Panel([
   ui.Label('← seed', {fontSize: '9px', color: THEME.sub, stretch: 'horizontal',
                       textAlign: 'left', fontFamily: FONT}),
@@ -720,9 +818,9 @@ var schematicAxis = ui.Panel([
                       textAlign: 'right', fontFamily: FONT})
 ], ui.Panel.Layout.flow('horizontal'), {margin: '2px 16px 0 16px', stretch: 'horizontal'});
 var schematicCaption = bodyText(
-  'BBCH principal stages 0–9: germination → leaf development → tillering → stem ' +
-  'elongation → booting → heading → flowering → milk/dough → ripening → ' +
-  'senescence. ▲ = stages PhenoMapper predicts (00, 10, 51, 53, 87, 89).',
+  'The BBCH scale tracks a crop from sowing to harvest: it germinates, develops ' +
+  'leaves, tillers, elongates, forms an ear (heading), ripens to gold, then ' +
+  'senesces. PhenoMapper predicts BBCH 00, 10, 51, 53, 87 and 89.',
   {fontSize: '10px', margin: '6px 16px 0 16px'});
 
 // ---- Controls ----
@@ -745,10 +843,15 @@ var bbchSelect = ui.Select({
 });
 var stageInfo = ui.Label('◔  Sowing / dry seed.', {fontSize: '11px', color: THEME.sub,
   fontStyle: 'italic', margin: '6px 16px 0 16px', fontFamily: FONT, whiteSpace: 'normal'});
+var mapModeSelect = ui.Select({
+  items: MAP_MODES, value: 'doy',
+  style: {stretch: 'horizontal', margin: '2px 0 0 0'},
+  onChange: function (v) { state.mode = v; updatePhenology(); }
+});
 var paletteSelect = ui.Select({
   items: Object.keys(PALETTES), value: DEFAULT_PALETTE,
   style: {stretch: 'horizontal', margin: '2px 0 0 0'},
-  onChange: function (v) { state.palette = v; applyPalette(); }
+  onChange: function (v) { state.palette = v; updatePhenology(); }
 });
 var opacitySlider = ui.Slider({
   min: 0, max: 1, value: 1, step: 0.05,
@@ -815,12 +918,13 @@ var controlPanel = ui.Panel({
   widgets: [
     headerPanel, aboutText, citationBox, paperLink, chipsPanel,
     sectionHeader('WHAT IS BBCH?'),
-    growthSchematic(), schematicAxis, schematicCaption,
+    bbchIllustration(), schematicAxis, schematicCaption,
     hr(),
     sectionHeader('EXPLORE'),
     labeledSelect('Season (year)', yearSelect),
     labeledSelect('Growth stage (BBCH)', bbchSelect, '8px'),
     stageInfo,
+    labeledSelect('Right-map layer', mapModeSelect, '8px'),
     labeledSelect('Colorbar', paletteSelect, '8px'),
     labeledSelect('Phenology layer opacity', opacitySlider, '8px'),
     hr(),
