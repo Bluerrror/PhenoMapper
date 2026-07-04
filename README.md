@@ -21,16 +21,17 @@ Companion web-app for the paper _“A novel fusion of Sentinel-1 and Sentinel-2 
 
 The app lets you:
 
-- 🗺️ Compare a **Crop Type Map** (left) against the **predicted Day-of-Year** of any growth stage (right) in a synced, wipeable split map.
+- 🗺️ Compare a **Crop Type Map** (left) against the **predicted Day-of-Year** of any growth stage (right) in a synced, wipeable split map, over a selectable **basemap** (Satellite · Hybrid · Roadmap · Terrain).
 - 🧮 Choose the **right-map layer**: single-stage Day-of-Year, **growing-season length** (emergence→maturity, in days), **5-year mean**, or **anomaly** (year − 5-year mean) — all derived on the fly from the data.
 - 📅 Switch between years (2017–2021) and BBCH stages (00, 10, 51, 53, 87, 89), with a **layer-opacity slider**.
-- 🎨 Choose a **scientific colorbar** (Viridis · Turbo · Magma · Seasonal) with Day-of-Year **and** month tick labels; anomaly maps use a diverging palette.
+- 🎨 Choose a **scientific colorbar** (Viridis · Turbo · Magma · Seasonal); ranges use a **2–98% percentile stretch** (cached per view) with Day-of-Year **and** month tick labels, and a diverging palette for anomalies.
+- 🖍️ **Highlight one crop** to show *only* that crop on **both** the crop-type map and the phenology map.
+- 🔍 **Zoom-aware rendering:** at national zoom the maps aggregate to a coarse grid, so they stay fast and fields fill in smoothly instead of appearing as scattered pixels; full resolution returns as you zoom in.
 - 🖱️ **Click any field** — or **draw an area to average** — to read that field’s phenology.
 - 📈 See a **smoothed BBCH development curve** (monotone-cubic PCHIP) on a real calendar-date axis, with **winter crops correctly starting in the previous autumn**.
 - 🔁 Toggle a **full 5-year time series (2017–2021)** where **each season is coloured by that year’s crop**, revealing crop rotation, plus a per-season summary (crop, emergence → maturity, growing-season length).
 - ⬇️ **Export the full time series to CSV** for the selected point or area (all years).
-- 🌱 Understand the scale from a **generated crop-growth illustration** (germination → heading → ripening → senescence).
-- ⚡ **Instant** year / stage / mode switching — colorbar ranges are set from per-stage defaults instead of a per-change server query.
+- 🌱 Understand the scale from a **generated crop-growth illustration** (sky, sun, soil, and wheat plants growing → heading → ripening → senescing).
 
 ---
 

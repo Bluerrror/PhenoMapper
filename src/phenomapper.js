@@ -173,8 +173,43 @@ function cropMaskAll(year) {
   return CTM.filterDate(year + '-01-01', year + '-12-31')
             .map(function (im) { return im.updateMask(mask); });
 }
+// Simple Germany bounding box — a light geometry for fast percentile stretches.
+var GERMANY_BBOX = ee.Geometry.Rectangle([5.8, 47.2, 15.1, 55.1]);
+
+// Single crop-type image per year (mosaic with a real projection) — far cheaper
+// than toBands()+reduce() for masks, which is what made "highlight" slow.
+var _ctmCache = {};
+function ctmYearImg(year) {
+  if (_ctmCache[year]) return _ctmCache[year];
+  var col = CTM.filterDate(year + '-01-01', year + '-12-31').select('b1');
+  var img = col.mosaic().setDefaultProjection(col.first().projection());
+  _ctmCache[year] = img;
+  return img;
+}
+function focusMaskImg(year) {
+  var b = ctmYearImg(year);
+  return b.eq(1101).or(b.eq(1102)).or(b.eq(1103)).or(b.eq(1201))
+          .or(b.eq(1202)).or(b.eq(1300)).or(b.eq(1402)).or(b.eq(1501));
+}
 function cropMaskSingle(year, code) {
-  return ctmBands(year).eq(Number(code)).reduce(ee.Reducer.max()).selfMask();
+  return ctmYearImg(year).eq(Number(code)).selfMask();
+}
+
+// Zoom-aware display resolution: at national zoom, aggregate to a coarse grid so
+// tiles render fast AND sparse fields fill in (instead of scattered pixels).
+function scaleForZoom(z) {
+  if (z == null) return 0;
+  if (z <= 6) return 1500;
+  if (z <= 7) return 800;
+  if (z <= 8) return 400;
+  if (z <= 9) return 200;
+  return 0;                       // z >= 10 → native full resolution
+}
+function coarsen(img, reducer, s) {
+  if (!s) return img;
+  return img.setDefaultProjection('EPSG:3857', null, 20)
+            .reduceResolution({reducer: reducer, maxPixels: 1024, bestEffort: true})
+            .reproject({crs: 'EPSG:3857', scale: s});
 }
 
 
@@ -304,59 +339,90 @@ function meanImg(stage) {
   return ee.ImageCollection(YEARS.map(function (y) { return phenoImg(y, stage); })).mean();
 }
 function updateCropLayer() {
+  var s = scaleForZoom(leftMap.getZoom());
   if (state.isolate) {
     var crop = cropOrFirst(state.cropCode);
-    layer_Crop.setEeObject(cropMaskSingle(state.year, state.cropCode));
-    layer_Crop.setVisParams({min: 1, max: 1, palette: [crop.color]});
+    layer_Crop.setEeObject(coarsen(cropMaskSingle(state.year, state.cropCode), ee.Reducer.mean(), s));
+    layer_Crop.setVisParams({min: 0.001, max: 1, palette: [crop.color]});
     layer_Crop.setName('Crop · ' + crop.name + ' · ' + state.year);
     renderCropLegend(crop.name + ' — ' + state.year);
   } else {
-    layer_Crop.setEeObject(cropMaskAll(state.year).map(remapper));
+    var img = remapper(ctmYearImg(state.year)).updateMask(focusMaskImg(state.year));
+    layer_Crop.setEeObject(coarsen(img, ee.Reducer.mode(), s));
     layer_Crop.setVisParams({min: 1, max: 8, palette: dict.colors});
     layer_Crop.setName('Crop Type Map · 10 m · ' + state.year);
     renderCropLegend('Crop Type — ' + state.year);
   }
 }
-// Build the right-map image + colorbar for the current mode. No server round-trip
-// (fixed per-stage ranges) so year / stage / mode / palette changes are instant.
+// Colorbar ranges are computed once per (mode,year,stage,crop) with a 2–98%
+// percentile stretch (good colours) and cached, so re-visits are instant.
+var rangeCache = {};
+function currentKey() {
+  return state.mode + '|' + state.year + '|' + state.bbch + '|' + (state.isolate ? state.cropCode : 'all');
+}
+
+// Build the right-map image + colorbar for the current mode.
 function updatePhenology() {
   var year = state.year, stage = state.bbch, r = stageRange(stage);
-  var img, min, max, palette = PALETTES[state.palette], title, name;
+  var refProj = phenoImg(year, stage).projection();
+  var base, palette = PALETTES[state.palette], title, name, isAnom = (state.mode === 'anom');
 
   if (state.mode === 'gsl') {                       // emergence → maturity, in days
-    var gsl = phenoImg(year, '89').subtract(phenoImg(year, '10'));
-    gsl = gsl.where(gsl.lt(0), gsl.add(365));       // wrap winter crops across new year
-    img = gsl; min = 80; max = 300;
+    var g = phenoImg(year, '89').subtract(phenoImg(year, '10'));
+    base = g.where(g.lt(0), g.add(365)).setDefaultProjection(refProj);
     title = 'Season length · days — ' + year;
     name = 'Season length (10→89) · ' + year;
   } else if (state.mode === 'mean') {               // 5-year mean DOY for this stage
-    img = meanImg(stage); min = r.min; max = r.max;
+    base = meanImg(stage).setDefaultProjection(refProj);
     title = '5-yr mean DOY — ' + bbchLabel(stage);
     name = '5-yr mean DOY · ' + bbchLabel(stage);
-  } else if (state.mode === 'anom') {               // this year − 5-year mean
-    img = phenoImg(year, stage).subtract(meanImg(stage)); min = -20; max = 20;
+  } else if (isAnom) {                              // this year − 5-year mean
+    base = phenoImg(year, stage).subtract(meanImg(stage)).setDefaultProjection(refProj);
     palette = DIVERGING;
     title = 'Anomaly · days — ' + bbchLabel(stage) + ' · ' + year;
     name = 'Anomaly vs 5-yr mean · ' + bbchLabel(stage) + ' · ' + year;
   } else {                                          // default: single-stage DOY
-    img = phenoImg(year, stage); min = r.min; max = r.max;
+    base = phenoImg(year, stage);
     title = 'Day of Year — ' + bbchLabel(stage);
     name = 'Phenology · DOY · ' + bbchLabel(stage) + ' · ' + year;
   }
 
-  // When "highlight this crop" is on, show the phenology of that crop only.
+  // "Highlight this crop" → show only that crop's phenology.
   if (state.isolate) {
-    img = img.updateMask(cropMaskSingle(state.year, state.cropCode));
+    base = base.updateMask(cropMaskSingle(state.year, state.cropCode));
     name += ' · ' + cropOrFirst(state.cropCode).name + ' only';
     title += '  ·  ' + cropOrFirst(state.cropCode).name;
   }
 
-  state.min = min; state.max = max; state.mapPalette = palette; state.colorTitle = title;
-  layer.setEeObject(img);
-  layer.setVisParams({min: min, max: max, palette: palette});
+  state.mapPalette = palette; state.colorTitle = title;
+  layer.setEeObject(coarsen(base, ee.Reducer.mean(), scaleForZoom(rightMap.getZoom())));
   layer.setName(name);
   layer.setOpacity(state.opacity);
-  renderColorBar();
+
+  function applyRange(mn, mx) {
+    state.min = mn; state.max = mx;
+    layer.setVisParams({min: mn, max: mx, palette: state.mapPalette});
+    renderColorBar();
+  }
+
+  if (isAnom) { applyRange(-20, 20); return; }      // symmetric fixed range
+
+  var key = currentKey();
+  if (rangeCache[key]) { applyRange(rangeCache[key].min, rangeCache[key].max); return; }
+
+  // Render immediately with a sensible default, then refine with a cached percentile.
+  applyRange(state.mode === 'gsl' ? 80 : r.min, state.mode === 'gsl' ? 300 : r.max);
+  base.reduceRegion({
+    reducer: ee.Reducer.percentile([2, 98]).setOutputs(['min', 'max']),
+    geometry: GERMANY_BBOX, scale: 3000, bestEffort: true, maxPixels: 1e9
+  }).evaluate(function (d, err) {
+    if (err || !d) return;
+    var mn = d[DOY_BAND + '_min'], mx = d[DOY_BAND + '_max'];
+    if (mn == null || mx == null || mx <= mn) return;
+    mn = Math.round(mn); mx = Math.round(mx);
+    rangeCache[key] = {min: mn, max: mx};
+    if (currentKey() === key) applyRange(mn, mx);    // ignore stale responses
+  });
 }
 
 
@@ -758,60 +824,76 @@ function growthSchematic() {
                   {margin: '8px 16px 0 16px', stretch: 'horizontal'});
 }
 
-// A painted crop-growth illustration (soil + plants that grow, form an ear,
-// ripen to gold, then senesce) rendered as a crisp image — clearer than bars.
+// A painted crop-growth scene rendered as an image: gradient sky + sun, soil,
+// and wheat plants that grow, sprout leaves, form an awned ear, ripen to gold
+// and senesce — much clearer than bars for understanding the BBCH lifecycle.
 function bbchIllustration() {
   try {
-    var W = 168, H = 52, G = 8;                     // canvas + ground level
+    var W = 184, H = 64, G = 10;
+    function disc(cx, cy, rad, n) {
+      var pts = []; n = n || 12;
+      for (var a = 0; a < n; a++) { var t = a / n * 2 * Math.PI; pts.push([cx + rad * Math.cos(t), cy + rad * Math.sin(t)]); }
+      return ee.Geometry.Polygon([pts]);
+    }
     var plants = [
-      {x: 14,  h: 3,  stem: 'green', ear: null},    // germination
-      {x: 36,  h: 11, stem: 'green', ear: null},    // leaf development
-      {x: 58,  h: 18, stem: 'green', ear: null},    // tillering
-      {x: 80,  h: 28, stem: 'green', ear: null},    // stem elongation
-      {x: 102, h: 36, stem: 'green', ear: 'green'}, // heading
-      {x: 124, h: 36, stem: 'gold',  ear: 'gold'},  // ripening
-      {x: 146, h: 27, stem: 'tan',   ear: 'tan'}    // senescence
+      {x: 16,  h: 5,  col: 'green', ear: null},   // germination
+      {x: 40,  h: 15, col: 'green', ear: null},   // leaf development
+      {x: 64,  h: 24, col: 'green', ear: null},   // tillering
+      {x: 88,  h: 34, col: 'green', ear: null},   // stem elongation
+      {x: 112, h: 40, col: 'green', ear: 'green'},// heading
+      {x: 136, h: 40, col: 'gold',  ear: 'gold'}, // ripening
+      {x: 162, h: 30, col: 'tan',   ear: 'tan'}   // senescence
     ];
-    var stems = {green: [], gold: [], tan: []},
-        ears  = {green: [], gold: [], tan: []}, leaves = [];
+    var stems = {green: [], gold: [], tan: []}, ears = {green: [], gold: [], tan: []},
+        leaves = [], awns = [];
     plants.forEach(function (p) {
-      var w = 1.5;
-      stems[p.stem].push(ee.Geometry.Rectangle([p.x - w, G, p.x + w, G + p.h]));
-      if (p.h > 12) {
-        var ly = G + p.h * 0.45;
-        leaves.push(ee.Geometry.Polygon([[[p.x - w, ly], [p.x - 9, ly + 4], [p.x - w, ly + 6]]]));
-        leaves.push(ee.Geometry.Polygon([[[p.x + w, ly - 2], [p.x + 9, ly + 2], [p.x + w, ly + 4]]]));
+      var w = 1.3, top = G + p.h, stemTop = top - (p.ear ? 5 : 0);
+      stems[p.col].push(ee.Geometry.Rectangle([p.x - w, G, p.x + w, stemTop]));
+      if (p.h > 12) {                                  // curved leaf blades
+        var l1 = G + p.h * 0.32, l2 = G + p.h * 0.58;
+        leaves.push(ee.Geometry.Polygon([[[p.x - w, l1], [p.x - 13, l1 + 7], [p.x - 11, l1 + 2], [p.x - w, l1 - 2]]]));
+        leaves.push(ee.Geometry.Polygon([[[p.x + w, l2], [p.x + 13, l2 + 7], [p.x + 11, l2 + 2], [p.x + w, l2 - 2]]]));
       }
-      if (p.ear) {
-        var ty = G + p.h, ew = 3.4, eh = 9;
-        ears[p.ear].push(ee.Geometry.Polygon([[[p.x, ty], [p.x - ew, ty + eh * 0.45],
-          [p.x, ty + eh], [p.x + ew, ty + eh * 0.45]]]));
+      if (p.ear) {                                     // spike (ear) body + awns
+        ears[p.ear].push(ee.Geometry.Polygon([[[p.x, stemTop - 1], [p.x - 3, stemTop + 3],
+          [p.x - 2.3, stemTop + 8], [p.x, stemTop + 11], [p.x + 2.3, stemTop + 8], [p.x + 3, stemTop + 3]]]));
+        [-2.2, 0, 2.2].forEach(function (dx) {
+          awns.push(ee.Geometry.Polygon([[[p.x + dx, stemTop + 9], [p.x + dx - 0.5, stemTop + 16],
+            [p.x + dx + 0.5, stemTop + 16]]]));
+        });
       }
     });
     var C = {
-      sky: [233, 243, 236], soil: [123, 92, 68],
-      green: [67, 160, 71], gold: [201, 162, 39], tan: [161, 112, 74],
-      egreen: [124, 179, 66], egold: [212, 182, 6], etan: [173, 138, 94], leaf: [76, 154, 66]
+      skyTop: [138, 196, 232], skyLow: [222, 240, 246],
+      soil: [128, 94, 66], soilLow: [92, 66, 46],
+      green: [70, 160, 73], gold: [206, 165, 40], tan: [166, 120, 80],
+      egreen: [140, 190, 78], egold: [224, 188, 26], etan: [190, 154, 104],
+      leaf: [86, 168, 74], awn: [232, 206, 120], sun: [255, 216, 96]
     };
     var lat = ee.Image.pixelLonLat().select('latitude');
-    var img = ee.Image.constant(C.sky).toByte();
-    img = img.where(lat.lt(G), ee.Image.constant(C.soil).toByte());
+    function mix(f, c1, c2) {
+      return ee.Image.cat([0, 1, 2].map(function (i) { return f.multiply(c1[i] - c2[i]).add(c2[i]); })).toByte();
+    }
+    var img = mix(lat.subtract(G).divide(H - G).clamp(0, 1), C.skyTop, C.skyLow);   // sky
+    img = img.where(lat.lt(G), mix(lat.divide(G).clamp(0, 1), C.soil, C.soilLow));  // soil
     function stamp(image, list, color) {
       if (!list.length) return image;
       var m = ee.Image(0).byte().paint(ee.FeatureCollection(list), 1);
       return image.where(m, ee.Image.constant(color).toByte());
     }
+    img = stamp(img, [disc(30, 54, 6, 16)], C.sun);
     img = stamp(img, leaves, C.leaf);
     img = stamp(img, stems.green, C.green);
     img = stamp(img, stems.gold, C.gold);
     img = stamp(img, stems.tan, C.tan);
+    img = stamp(img, awns, C.awn);
     img = stamp(img, ears.green, C.egreen);
     img = stamp(img, ears.gold, C.egold);
     img = stamp(img, ears.tan, C.etan);
     return ui.Thumbnail({
       image: img.visualize({min: 0, max: 255}),
-      params: {dimensions: '340x104', region: ee.Geometry.Rectangle([0, 0, W, H]), format: 'png'},
-      style: {stretch: 'horizontal', maxHeight: '112px', margin: '8px 16px 0 16px',
+      params: {dimensions: '368x128', region: ee.Geometry.Rectangle([0, 0, W, H]), format: 'png'},
+      style: {stretch: 'horizontal', maxHeight: '124px', margin: '8px 16px 0 16px',
               border: '1px solid ' + THEME.line}
     });
   } catch (e) {
@@ -854,6 +936,13 @@ var mapModeSelect = ui.Select({
   items: MAP_MODES, value: 'doy',
   style: {stretch: 'horizontal', margin: '2px 0 0 0'},
   onChange: function (v) { state.mode = v; updatePhenology(); }
+});
+var basemapSelect = ui.Select({
+  items: [{label: 'Satellite', value: 'SATELLITE'}, {label: 'Hybrid (with labels)', value: 'HYBRID'},
+          {label: 'Roadmap', value: 'ROADMAP'}, {label: 'Terrain', value: 'TERRAIN'}],
+  value: 'SATELLITE',
+  style: {stretch: 'horizontal', margin: '2px 0 0 0'},
+  onChange: function (v) { leftMap.setOptions(v); rightMap.setOptions(v); }
 });
 var paletteSelect = ui.Select({
   items: Object.keys(PALETTES), value: DEFAULT_PALETTE,
@@ -935,6 +1024,7 @@ var controlPanel = ui.Panel({
     labeledSelect('Growth stage (BBCH)', bbchSelect, '8px'),
     stageInfo,
     labeledSelect('Right-map layer', mapModeSelect, '8px'),
+    labeledSelect('Basemap', basemapSelect, '8px'),
     labeledSelect('Colorbar', paletteSelect, '8px'),
     labeledSelect('Phenology layer opacity', opacitySlider, '8px'),
     hr(),
@@ -973,9 +1063,20 @@ ui.root.add(appSplit);
 // ============================================================================
 //  11. INITIAL RENDER
 // ============================================================================
-renderCropLegend('Crop Type — 2017');
 renderColorBar();
 updatePhenology();
+updateCropLayer();
+
+// Re-render at a coarser resolution when the map crosses a zoom band (national
+// vs. local), so low zoom stays fast and fields fill in instead of showing as
+// scattered pixels. Guarded so panning at the same zoom does not re-render.
+var lastZoomBucket = scaleForZoom(rightMap.getZoom());
+function onZoomChange() {
+  var b = scaleForZoom(rightMap.getZoom());
+  if (b !== lastZoomBucket) { lastZoomBucket = b; updatePhenology(); updateCropLayer(); }
+}
+rightMap.onChangeZoom(onZoomChange);
+leftMap.onChangeZoom(onZoomChange);
 
 // Center on the Frankenhausen study site AFTER the maps are attached to the
 // root — a setCenter call before attachment is dropped once the nested split
